@@ -48,7 +48,7 @@ This is a simple monitor to display the current glucose level and trend through 
 
 -   The code is designed to run on an ESP32 microcontroller
 -   The code is designed to display on an 2.8" TFT LCD display
--   If you experience any issues or have suggestions, please open an issue or submit a pull request or contact me at jpmedina21@gmail.com
+-   If you experience any issues or have suggestions, please open an issue or submit a pull request or contact me at jmedinamulet@gmail.com
 
 ## Changelog
 
