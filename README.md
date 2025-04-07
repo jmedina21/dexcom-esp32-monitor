@@ -53,8 +53,12 @@ This is a simple monitor to display the current glucose level and trend through 
 ## Changelog
 
 -   March 12, 2025
+
     -   Improve glucose difference calculation
-    -   Change diagonal trend arrow to since it the graphics library couldn't render the original one
+    -   Change diagonal trend arrow, since the graphics library couldn't render the original one
     -   Added wifi reconnection logic
     -   Added session token request when it is expired
     -   Minor style fixes
+
+-   Apr 07, 2025
+    -   Added Links to non US Dexcom users
