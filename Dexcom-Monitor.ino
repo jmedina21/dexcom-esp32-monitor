@@ -17,9 +17,15 @@ const char *password = "xxxx"; // Replace with your Wi-Fi password
 // Initialize Display
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
+//North America
 const char *dexcomAuthenticateURL = "https://share2.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
 const char *dexcomLoginURL = "https://share2.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
 const char *dexcomDataURL = "https://share2.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
+
+//Other Countries
+// const char *dexcomAuthenticateURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
+// const char *dexcomLoginURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
+// const char *dexcomDataURL = "https://shareous1.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
 
 const char *dexcomUsername = "xxxx";
 const char *dexcomPassword = "xxxx";
