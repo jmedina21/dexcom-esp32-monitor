@@ -57,6 +57,10 @@ This is a simple monitor to display the current glucose level and trend through 
 
 ## Changelog
 
+-   August 16, 2025
+
+    -   Improve retry authentication logic
+
 -   March 12, 2025
 
     -   Improve glucose difference calculation
