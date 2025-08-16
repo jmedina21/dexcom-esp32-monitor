@@ -17,15 +17,15 @@ const char *password = "xxxx"; // Replace with your Wi-Fi password
 // Initialize Display
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
-//North America
+// North America
 const char *dexcomAuthenticateURL = "https://share2.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
 const char *dexcomLoginURL = "https://share2.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
 const char *dexcomDataURL = "https://share2.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
 
-//Other Countries
-// const char *dexcomAuthenticateURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
-// const char *dexcomLoginURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
-// const char *dexcomDataURL = "https://shareous1.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
+// Other Regions
+//  const char *dexcomAuthenticateURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
+//  const char *dexcomLoginURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
+//  const char *dexcomDataURL = "https://shareous1.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
 
 const char *dexcomUsername = "xxxx";
 const char *dexcomPassword = "xxxx";
@@ -42,6 +42,9 @@ float glucose_diff = 0;
 float glucose_mmol = 0;
 String trend = "Stable";
 String timestamp = "N/A";
+
+unsigned long sessionStartMs = 0;
+const unsigned long SESSION_REFRESH_MS = 23UL * 60UL * 60UL * 1000UL; // 23h
 
 // Trend direction mapping
 const char *DEXCOM_TREND_DIRECTIONS[] = {
@@ -98,174 +101,157 @@ void setup()
 
     delay(2000);
 
-    if (authenticateToDexcom())
+    if (authenticateToDexcom() && loginToDexcom())
     {
-        Serial.println(accountId);
-        if (loginToDexcom())
-        {
-            Serial.println(sessionId);
-            fetchGlucoseData();
-        }
+        fetchGlucoseData();
     }
-    fetchGlucoseData();
+    else
+    {
+        Serial.println("Initial Dexcom login failed");
+    }
 }
 
 void loop()
 {
     static unsigned long lastFetchTime = 0;
     static unsigned long lastWiFiCheckTime = 0;
-    unsigned long currentMillis = millis();
+    unsigned long now = millis();
 
-    if (currentMillis - lastWiFiCheckTime >= 300000)
-    { // Check WiFi every 5 minutes
+    if (now - lastWiFiCheckTime >= 300000UL)
+    {
         checkWiFiConnection();
-        lastWiFiCheckTime = currentMillis;
+        lastWiFiCheckTime = now;
     }
-
-    if (currentMillis - lastFetchTime >= 300000)
-    { // Fetch glucose data every 5 minutes
+    if (now - lastFetchTime >= 300000UL)
+    {
         fetchGlucoseData();
-        lastFetchTime = currentMillis;
+        lastFetchTime = now;
     }
 }
 
 bool authenticateToDexcom()
 {
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() != WL_CONNECTED)
+        return false;
+    HTTPClient http;
+    http.setTimeout(8000);
+    http.begin(dexcomAuthenticateURL);
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"accountName\":\"" + String(dexcomUsername) + "\",\"password\":\"" + String(dexcomPassword) + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
+    int code = http.POST(payload);
+    if (code == HTTP_CODE_OK)
     {
-        HTTPClient http;
-        http.begin(dexcomAuthenticateURL);
-        http.addHeader("Content-Type", "application/json");
-
-        // JSON payload for login
-        String authenticatePayload = "{\"accountName\":\"" + String(dexcomUsername) + "\",\"password\":\"" + String(dexcomPassword) + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
-
-        int httpCode = http.POST(authenticatePayload);
-
-        if (httpCode == HTTP_CODE_OK)
-        {
-            accountId = http.getString();
-            accountId.replace("\"", ""); // Remove quotes
-            Serial.println("Dexcom Session ID: " + accountId);
-            http.end();
-            return true;
-        }
-        else
-        {
-            Serial.printf("Login failed, HTTP code: %d\n", httpCode);
-            http.end();
-            return false;
-        }
+        accountId = http.getString();
+        accountId.replace("\"", "");
+        http.end();
+        return true;
     }
+    http.end();
     return false;
 }
 
 bool loginToDexcom()
 {
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() != WL_CONNECTED)
+        return false;
+    HTTPClient http;
+    http.setTimeout(8000);
+    http.begin(dexcomLoginURL);
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"accountId\":\"" + accountId + "\",\"password\":\"" + String(dexcomPassword) + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
+    int code = http.POST(payload);
+    if (code == HTTP_CODE_OK)
     {
-        HTTPClient http;
-        http.begin(dexcomLoginURL);
-        http.addHeader("Content-Type", "application/json");
-
-        // JSON payload for login
-        String loginPayload = "{\"accountId\":\"" + String(accountId) + "\",\"password\":\"" + String(dexcomPassword) + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
-
-        int httpCode = http.POST(loginPayload);
-
-        if (httpCode == HTTP_CODE_OK)
-        {
-            sessionId = http.getString();
-            sessionId.replace("\"", ""); // Remove quotes
-            Serial.println("Dexcom Session ID: " + sessionId);
-            http.end();
-            return true;
-        }
-        else
-        {
-            Serial.printf("Login failed, HTTP code: %d\n", httpCode);
-            http.end();
-            return false;
-        }
+        sessionId = http.getString();
+        sessionId.replace("\"", "");
+        sessionStartMs = millis();
+        http.end();
+        return true;
     }
+    http.end();
     return false;
+}
+
+bool refreshSession()
+{
+    sessionId = "";
+    // Some deployments require re-auth before login after long idle
+    if (!authenticateToDexcom())
+        return false;
+    return loginToDexcom();
 }
 
 void fetchGlucoseData()
 {
-    if (WiFi.status() == WL_CONNECTED && sessionId != "")
+    if (WiFi.status() != WL_CONNECTED)
+        return;
+
+    // Proactive refresh before the 24h cutoff
+    if (sessionId == "" || (millis() - sessionStartMs) >= SESSION_REFRESH_MS)
     {
-        HTTPClient http;
-        http.begin(dexcomDataURL);
-        http.addHeader("Content-Type", "application/json");
-
-        // Request last 4 glucose values
-        String fetchPayload = "{\"sessionId\":\"" + sessionId + "\",\"minutes\":1440,\"maxCount\":4}";
-
-        int httpCode = http.POST(fetchPayload);
-
-        if (httpCode == HTTP_CODE_OK)
+        if (!refreshSession())
         {
-            String payload = http.getString();
-            Serial.println("Response: " + payload);
+            Serial.println("Session refresh failed");
+            return;
+        }
+    }
 
-            // Check for "SessionNotValid" in response
-            if (payload.indexOf("SessionNotValid") != -1)
-            {
-                Serial.println("Session expired! Re-authenticating...");
+    bool attemptedRefresh = false;
 
-                // Re-login
-                if (loginToDexcom())
-                {
-                    Serial.println("Re-login successful. Retrying glucose data fetch...");
-                    fetchGlucoseData(); // Retry after successful login
-                }
-                else
-                {
-                    Serial.println("Re-login failed!");
-                }
-                return; // Stop execution here
-            }
+RETRY_FETCH:
+    if (sessionId == "")
+        return;
 
-            // Parse JSON
-            DynamicJsonDocument doc(2048);
-            DeserializationError error = deserializeJson(doc, payload);
+    HTTPClient http;
+    http.setTimeout(8000);
+    http.begin(dexcomDataURL);
+    http.addHeader("Content-Type", "application/json");
 
-            if (!error && doc.size() >= 3)
-            {
-                int difIndex = checkDiff(doc) ? 2 : 1;
-                previous_glucose_mgdl = doc[difIndex]["Value"];
-                current_glucose_mgdl = doc[0]["Value"];
-                glucose_mmol = current_glucose_mgdl / 18;
-                trend = String(doc[0]["Trend"]);
+    String fetchPayload = "{\"sessionId\":\"" + sessionId + "\",\"minutes\":1440,\"maxCount\":4}";
+    int httpCode = http.POST(fetchPayload);
+    String payload = (httpCode > 0) ? http.getString() : "";
+    http.end();
 
-                // Extract & format timestamp
-                String rawTime = doc[0]["DT"]; // Example: "Date(1741497044189-0500)"
-                timestamp = formatTimestamp(rawTime);
+    bool bodyInvalid = payload.indexOf("SessionNotValid") != -1 || payload.indexOf("SessionId") != -1;
 
-                // Calculate difference
-                glucose_diff = current_glucose_mgdl - previous_glucose_mgdl;
-
-                Serial.printf("Glucose: %.0f mg/dL | Trend: %s | Change: %+0.1f | Time: %s\n",
-                              current_glucose_mgdl, trend.c_str(), glucose_diff, timestamp.c_str());
-
-                updateDisplay(); // Update LCD
-            }
-            else
-            {
-                Serial.print("JSON Deserialization Error: ");
-                Serial.println(error.c_str());
-            }
+    if (httpCode == HTTP_CODE_OK && !bodyInvalid)
+    {
+        DynamicJsonDocument doc(2048);
+        DeserializationError err = deserializeJson(doc, payload);
+        if (!err && doc.size() >= 3)
+        {
+            int difIndex = checkDiff(doc) ? 2 : 1;
+            previous_glucose_mgdl = doc[difIndex]["Value"];
+            current_glucose_mgdl = doc[0]["Value"];
+            glucose_mmol = current_glucose_mgdl / 18.0;
+            trend = String(doc[0]["Trend"]);
+            timestamp = formatTimestamp(doc[0]["DT"]);
+            glucose_diff = current_glucose_mgdl - previous_glucose_mgdl;
+            updateDisplay();
+            return;
         }
         else
         {
-            Serial.printf("Failed to get glucose data, HTTP code: %d\n", httpCode);
+            Serial.print("JSON parse error: ");
+            Serial.println(err.c_str());
+            return;
         }
-        http.end();
     }
     else
     {
-        Serial.println("WiFi not connected or invalid session ID.");
+        // On auth/session errors, refresh once then retry
+        if (!attemptedRefresh && (httpCode == 401 || httpCode == 403 || httpCode >= 500 || bodyInvalid))
+        {
+            Serial.printf("Session likely expired (code %d). Refreshing...\n", httpCode);
+            attemptedRefresh = true;
+            if (refreshSession())
+                goto RETRY_FETCH;
+            Serial.println("Refresh failed.");
+        }
+        else
+        {
+            Serial.printf("HTTP error: %d\n", httpCode);
+        }
     }
 }
 
