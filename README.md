@@ -23,6 +23,13 @@ Previous version
 -   Jumper wires (if the microcontroller and display are separated, recommended to have it as one unit).
 -   Have an account on Dexcom Share
 
+### Arduino Libraries Required
+Install the following libraries via Arduino IDE Library Manager:
+
+- Adafruit GFX Library
+- Adafruit ILI9341
+- ArduinoJson
+
 -   ### Optional
     -    [3d Model I used to house the device](https://makerworld.com/en/models/1012388-housing-display-tft-ili9341-esp32-esp8266#profileId-991967) designed by [@maker.bamboo](https://makerworld.com/en/@maker.bamboo)
 
