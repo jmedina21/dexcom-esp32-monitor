@@ -38,6 +38,7 @@ String sessionId = "";
 float current_glucose_mgdl = 0;
 float previous_glucose_mgdl = 0;
 float glucose_diff = 0;
+bool validDiff = false;
 
 float glucose_mmol = 0;
 String trend = "Stable";
@@ -45,6 +46,24 @@ String timestamp = "N/A";
 
 unsigned long sessionStartMs = 0;
 const unsigned long SESSION_REFRESH_MS = 23UL * 60UL * 60UL * 1000UL; // 23h
+
+// NTP time sync
+const char *ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 0;     // Use UTC for comparing with Dexcom timestamps
+const int daylightOffset_sec = 0; // No DST adjustment needed for UTC
+bool ntpSynced = false;
+
+// Adaptive polling - uses NTP time for accurate scheduling
+time_t lastReadingTimestamp = 0;                   // Unix timestamp of last reading
+const int READING_INTERVAL_SEC = 300;              // Dexcom readings are 5 min apart
+const int FETCH_BUFFER_SEC = 15;                   // Buffer after expected reading time
+const unsigned long MIN_FETCH_INTERVAL_MS = 30000; // Minimum 30s between API calls
+
+// Historical readings for graph (10 hours = 120 readings at 5-min intervals)
+const int GRAPH_POINTS = 120;
+float graphReadings[GRAPH_POINTS];
+time_t graphTimestamps[GRAPH_POINTS];
+int graphCount = 0; // Number of valid readings stored
 
 // Trend direction mapping
 const char *DEXCOM_TREND_DIRECTIONS[] = {
@@ -86,6 +105,30 @@ void setup()
     }
     Serial.println("Connected to WiFi");
 
+    // Sync time with NTP server
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    Serial.print("Syncing NTP time");
+    time_t now = 0;
+    int ntpRetries = 0;
+    while (now < 1000000000 && ntpRetries < 10)
+    {
+        delay(500);
+        Serial.print(".");
+        time(&now);
+        ntpRetries++;
+    }
+    if (now >= 1000000000)
+    {
+        ntpSynced = true;
+        Serial.println(" synced!");
+        Serial.print("Current UTC time: ");
+        Serial.println(now);
+    }
+    else
+    {
+        Serial.println(" failed! Using fallback polling.");
+    }
+
     // Initialize Display
     SPI.begin(23, 19, 18, 5);
     tft.begin();
@@ -115,17 +158,56 @@ void loop()
 {
     static unsigned long lastFetchTime = 0;
     static unsigned long lastWiFiCheckTime = 0;
-    unsigned long now = millis();
+    unsigned long nowMs = millis();
 
-    if (now - lastWiFiCheckTime >= 300000UL)
+    if (nowMs - lastWiFiCheckTime >= 300000UL)
     {
         checkWiFiConnection();
-        lastWiFiCheckTime = now;
+        lastWiFiCheckTime = nowMs;
     }
-    if (now - lastFetchTime >= 300000UL)
+
+    // Enforce minimum interval between API calls
+    if (nowMs - lastFetchTime < MIN_FETCH_INTERVAL_MS)
+        return;
+
+    // Adaptive polling using NTP time
+    bool shouldFetch = false;
+
+    if (lastReadingTimestamp == 0)
+    {
+        // First run or no valid reading yet - fetch immediately
+        shouldFetch = true;
+    }
+    else if (ntpSynced)
+    {
+        // Use accurate NTP time for polling
+        time_t currentTime;
+        time(&currentTime);
+
+        // Next reading expected at lastReadingTimestamp + 5 minutes
+        time_t nextReadingExpected = lastReadingTimestamp + READING_INTERVAL_SEC;
+
+        // Fetch when current time >= next expected + buffer
+        shouldFetch = (currentTime >= nextReadingExpected + FETCH_BUFFER_SEC);
+    }
+    else
+    {
+        // Fallback: fetch every 5 min 15 sec using millis
+        static unsigned long lastSuccessfulFetchMs = 0;
+        if (lastSuccessfulFetchMs == 0)
+            lastSuccessfulFetchMs = nowMs;
+
+        unsigned long elapsedMs = nowMs - lastSuccessfulFetchMs;
+        shouldFetch = (elapsedMs >= (READING_INTERVAL_SEC + FETCH_BUFFER_SEC) * 1000UL);
+
+        if (shouldFetch)
+            lastSuccessfulFetchMs = nowMs;
+    }
+
+    if (shouldFetch)
     {
         fetchGlucoseData();
-        lastFetchTime = now;
+        lastFetchTime = nowMs;
     }
 }
 
@@ -207,7 +289,7 @@ RETRY_FETCH:
     http.begin(dexcomDataURL);
     http.addHeader("Content-Type", "application/json");
 
-    String fetchPayload = "{\"sessionId\":\"" + sessionId + "\",\"minutes\":1440,\"maxCount\":4}";
+    String fetchPayload = "{\"sessionId\":\"" + sessionId + "\",\"minutes\":360,\"maxCount\":120}";
     int httpCode = http.POST(fetchPayload);
     String payload = (httpCode > 0) ? http.getString() : "";
     http.end();
@@ -216,17 +298,60 @@ RETRY_FETCH:
 
     if (httpCode == HTTP_CODE_OK && !bodyInvalid)
     {
-        DynamicJsonDocument doc(2048);
+        DynamicJsonDocument doc(24576); // Increased for 120 readings
         DeserializationError err = deserializeJson(doc, payload);
-        if (!err && doc.size() >= 3)
+        if (!err && doc.size() >= 2)
         {
-            int difIndex = checkDiff(doc) ? 2 : 1;
-            previous_glucose_mgdl = doc[difIndex]["Value"];
             current_glucose_mgdl = doc[0]["Value"];
             glucose_mmol = current_glucose_mgdl / 18.0;
             trend = String(doc[0]["Trend"]);
             timestamp = formatTimestamp(doc[0]["DT"]);
-            glucose_diff = current_glucose_mgdl - previous_glucose_mgdl;
+            time_t newReadingTimestamp = extractUnixTime(doc[0]["DT"]);
+
+            // Update timestamp if this is a new reading
+            if (newReadingTimestamp != lastReadingTimestamp)
+            {
+                lastReadingTimestamp = newReadingTimestamp;
+            }
+
+            // Store historical readings for graph (newest first in API, we store oldest first)
+            graphCount = min((int)doc.size(), GRAPH_POINTS);
+            for (int i = 0; i < graphCount; i++)
+            {
+                // Reverse order: API index 0 (newest) goes to our array end
+                int srcIdx = graphCount - 1 - i;
+                graphReadings[i] = doc[srcIdx]["Value"];
+                graphTimestamps[i] = extractUnixTime(doc[srcIdx]["DT"]);
+            }
+
+            // Find best previous reading and calculate normalized difference
+            time_t timeDiffSeconds = 0;
+            int prevIndex = findBestPreviousReading(doc, timeDiffSeconds);
+
+            if (prevIndex > 0 && timeDiffSeconds > 0)
+            {
+                previous_glucose_mgdl = doc[prevIndex]["Value"];
+                float rawDiff = current_glucose_mgdl - previous_glucose_mgdl;
+
+                // Normalize to per-5-minute rate if time diff is between 3-10 minutes
+                if (timeDiffSeconds >= 180 && timeDiffSeconds <= 600)
+                {
+                    glucose_diff = rawDiff * 300.0 / timeDiffSeconds;
+                }
+                else
+                {
+                    // Use raw difference for very short intervals
+                    glucose_diff = rawDiff;
+                }
+                validDiff = true;
+            }
+            else
+            {
+                // No valid previous reading found
+                glucose_diff = 0;
+                validDiff = false;
+            }
+
             updateDisplay();
             return;
         }
@@ -255,18 +380,40 @@ RETRY_FETCH:
     }
 }
 
-bool checkDiff(DynamicJsonDocument &doc)
+int findBestPreviousReading(DynamicJsonDocument &doc, time_t &timeDiffSeconds)
 {
-    if (doc.size() < 3)
-        return false;
+    if (doc.size() < 2)
+        return -1;
 
-    time_t time0 = extractUnixTime(doc[0]["DT"]);
-    time_t time1 = extractUnixTime(doc[1]["DT"]);
-    Serial.println(time0);
-    Serial.println(time1);
-    Serial.println(abs(time0 - time1) < 300);
+    time_t currentTime = extractUnixTime(doc[0]["DT"]);
+    const time_t TARGET_DIFF = 300; // 5 minutes in seconds
+    const time_t MAX_AGE = 900;     // 15 minutes - readings older than this are stale
 
-    return abs(time0 - time1) < 300;
+    int bestIndex = -1;
+    time_t bestDiff = MAX_AGE + 1;
+
+    // Check readings 1 through min(5, doc.size()-1) to handle duplicate readings
+    int maxIndex = min((int)doc.size() - 1, 5);
+    for (int i = 1; i <= maxIndex; i++)
+    {
+        time_t readingTime = extractUnixTime(doc[i]["DT"]);
+        time_t diff = currentTime - readingTime;
+
+        // Skip if reading is in the future or too old
+        if (diff <= 0 || diff > MAX_AGE)
+            continue;
+
+        // Find reading closest to 5 minutes ago
+        time_t distanceFromTarget = abs(diff - TARGET_DIFF);
+        if (distanceFromTarget < bestDiff)
+        {
+            bestDiff = distanceFromTarget;
+            bestIndex = i;
+            timeDiffSeconds = diff;
+        }
+    }
+
+    return bestIndex;
 }
 
 time_t extractUnixTime(String rawTime)
@@ -333,72 +480,159 @@ String formatTimestamp(String rawTime)
     return "N/A";
 }
 
-// Draw a 45-degree up-right arrow
+// Draw a 45-degree up-right arrow (↗) using filled triangle for arrowhead
 void drawDiagonalUpArrow(int x, int y, int size, uint16_t color)
 {
-    // Arrow body
-    tft.drawLine(x, y, x + size, y - size, color);
-    // Arrow head
-    tft.drawLine(x + size, y - size, x + size - (size / 3), y - size + (size / 3), color);
-    tft.drawLine(x + size, y - size, x + size - (size / 3), y - size, color);
+    // Arrowhead tip is at top-right
+    int tipX = x + size;
+    int tipY = y - size;
+
+    // Filled triangle arrowhead pointing up-right
+    // Tip at (tipX, tipY), base perpendicular to the arrow direction
+    int headSize = size / 2;
+    tft.fillTriangle(
+        tipX, tipY,            // Tip
+        tipX - headSize, tipY, // Base left
+        tipX, tipY + headSize, // Base bottom
+        color);
+
+    // Arrow shaft (thicker line using multiple parallel lines)
+    int shaftLen = size - headSize / 2;
+    for (int i = -1; i <= 1; i++)
+    {
+        tft.drawLine(x, y + i, x + shaftLen, y - shaftLen + i, color);
+    }
 }
 
-// Draw a 45-degree down-right arrow
+// Draw a 45-degree down-right arrow (↘) using filled triangle for arrowhead
 void drawDiagonalDownArrow(int x, int y, int size, uint16_t color)
 {
-    // Arrow body
-    tft.drawLine(x, y, x + size, y + size, color);
-    // Arrow head
-    tft.drawLine(x + size, y + size, x + size - (size / 3), y + size - (size / 3), color);
-    tft.drawLine(x + size, y + size, x + size - (size / 3), y + size, color);
+    // Arrowhead tip is at bottom-right
+    int tipX = x + size;
+    int tipY = y + size;
+
+    // Filled triangle arrowhead pointing down-right
+    int headSize = size / 2;
+    tft.fillTriangle(
+        tipX, tipY,            // Tip
+        tipX - headSize, tipY, // Base left
+        tipX, tipY - headSize, // Base top
+        color);
+
+    // Arrow shaft (thicker line using multiple parallel lines)
+    int shaftLen = size - headSize / 2;
+    for (int i = -1; i <= 1; i++)
+    {
+        tft.drawLine(x, y + i, x + shaftLen, y + shaftLen + i, color);
+    }
+}
+
+void drawGraph()
+{
+    if (graphCount < 2)
+        return;
+
+    // Graph dimensions
+    const int graphX = 25;  // Left margin (space for Y labels)
+    const int graphY = 125; // Top of graph area
+    const int graphW = 290; // Width
+    const int graphH = 100; // Height
+    const float minGlucose = 40.0;
+    const float maxGlucose = 300.0;
+    const float glucoseRange = maxGlucose - minGlucose;
+
+    // Draw border
+    tft.drawRect(graphX, graphY, graphW, graphH, ILI9341_DARKGREY);
+
+    // Draw target range lines (70 and 180 mg/dL)
+    int y70 = graphY + graphH - (int)((70.0 - minGlucose) / glucoseRange * graphH);
+    int y180 = graphY + graphH - (int)((180.0 - minGlucose) / glucoseRange * graphH);
+
+    // Dashed lines for target range
+    for (int x = graphX; x < graphX + graphW; x += 6)
+    {
+        tft.drawPixel(x, y70, ILI9341_BLUE);
+        tft.drawPixel(x + 1, y70, ILI9341_BLUE);
+        tft.drawPixel(x, y180, ILI9341_RED);
+        tft.drawPixel(x + 1, y180, ILI9341_RED);
+    }
+
+    // Y-axis labels
+    tft.setTextColor(ILI9341_DARKGREY);
+    tft.setTextSize(1);
+    tft.setCursor(2, y180 - 3);
+    tft.print("180");
+    tft.setCursor(8, y70 - 3);
+    tft.print("70");
+
+    // Plot glucose line using actual timestamps for x-position
+    // This handles gaps (missed readings) and duplicates correctly
+    time_t oldestTime = graphTimestamps[0];
+    time_t newestTime = graphTimestamps[graphCount - 1];
+    time_t timeRange = newestTime - oldestTime;
+
+    // Avoid division by zero if all timestamps are the same
+    if (timeRange <= 0)
+        timeRange = 1;
+
+    for (int i = 1; i < graphCount; i++)
+    {
+        float val1 = constrain(graphReadings[i - 1], minGlucose, maxGlucose);
+        float val2 = constrain(graphReadings[i], minGlucose, maxGlucose);
+
+        // Calculate x-position based on actual timestamp
+        int x1 = graphX + (int)(((graphTimestamps[i - 1] - oldestTime) * (long)graphW) / timeRange);
+        int x2 = graphX + (int)(((graphTimestamps[i] - oldestTime) * (long)graphW) / timeRange);
+        int y1 = graphY + graphH - (int)((val1 - minGlucose) / glucoseRange * graphH);
+        int y2 = graphY + graphH - (int)((val2 - minGlucose) / glucoseRange * graphH);
+
+        // Color based on glucose level
+        uint16_t lineColor = ILI9341_GREEN;
+        if (val2 > 180)
+            lineColor = ILI9341_RED;
+        else if (val2 < 70)
+            lineColor = ILI9341_BLUE;
+
+        tft.drawLine(x1, y1, x2, y2, lineColor);
+    }
+
+    // Time labels (start and end) - dynamic based on actual data range
+    tft.setTextColor(ILI9341_DARKGREY);
+    tft.setTextSize(1);
+    tft.setCursor(graphX, graphY + graphH + 3);
+    int hoursAgo = (timeRange + 1800) / 3600; // Round to nearest hour
+    if (hoursAgo < 1)
+        hoursAgo = 1;
+    tft.printf("-%dh", hoursAgo);
+    tft.setCursor(graphX + graphW - 20, graphY + graphH + 3);
+    tft.print("now");
 }
 
 void updateDisplay()
 {
     tft.fillScreen(ILI9341_BLACK);
 
-    // Title
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(20, 10);
-    tft.print("Glucose Monitor");
-
     int colorBasedOnGlucose = ILI9341_GREEN;
-
     if (current_glucose_mgdl > 180)
-    {
         colorBasedOnGlucose = ILI9341_RED;
-    }
     else if (current_glucose_mgdl < 70)
-    {
         colorBasedOnGlucose = ILI9341_BLUE;
-    }
-    else
-    {
-        colorBasedOnGlucose = ILI9341_GREEN;
-    }
 
-    // Glucose mg/dL
+    // Row 1: Glucose mg/dL (large) + diff + unit
     tft.setTextColor(colorBasedOnGlucose);
     tft.setTextSize(4);
-    tft.setCursor(40, 50);
+    tft.setCursor(10, 8);
     tft.printf("%.0f", current_glucose_mgdl);
-    tft.setTextSize(2);
-    tft.setCursor(160, 60);
-    tft.print("mg/dL");
 
-    // Glucose mmol/L
-    tft.setTextSize(3);
-    tft.setCursor(40, 100);
-    tft.printf("%.1f", glucose_mmol);
+    // Glucose Change Indicator (next to mg/dL value)
     tft.setTextSize(2);
-    tft.setCursor(160, 110);
-    tft.print("mmol/L");
-
-    // Glucose Change Indicator
-    tft.setTextSize(2);
-    tft.setCursor(115, 57);
-    if (glucose_diff > 0)
+    tft.setCursor(95, 15);
+    if (!validDiff)
+    {
+        tft.setTextColor(ILI9341_WHITE);
+        tft.print("--");
+    }
+    else if (glucose_diff > 0)
     {
         tft.printf("+%.0f", glucose_diff);
     }
@@ -412,10 +646,22 @@ void updateDisplay()
         tft.print("+0");
     }
 
-    // **Trend Arrow & Text**
-    tft.setTextSize(4);
-    tft.setCursor(40, 170);
+    tft.setTextColor(colorBasedOnGlucose);
+    tft.setTextSize(2);
+    tft.setCursor(140, 15);
+    tft.print("mg/dL");
 
+    // Row 2: mmol/L + Trend arrow + trend text
+    tft.setTextColor(colorBasedOnGlucose);
+    tft.setTextSize(3);
+    tft.setCursor(10, 45);
+    tft.printf("%.1f", glucose_mmol);
+
+    tft.setTextSize(1);
+    tft.setCursor(75, 55);
+    tft.print("mmol/L");
+
+    // Trend Arrow (smaller, inline)
     int trendIndex = -1;
     for (int i = 0; i < 10; i++)
     {
@@ -426,45 +672,64 @@ void updateDisplay()
         }
     }
 
-    // Handle display based on trend index
+    tft.setTextSize(3);
+    tft.setCursor(130, 45);
     if (trendIndex != -1)
     {
-        // For FortyFiveUp (3) and FortyFiveDown (5), use custom arrows
         if (trendIndex == 3)
         { // FortyFiveUp
             trend = "Increasing";
-            drawDiagonalUpArrow(40, 180, 20, colorBasedOnGlucose);
+            drawDiagonalUpArrow(130, 60, 15, colorBasedOnGlucose);
         }
         else if (trendIndex == 5)
         { // FortyFiveDown
             trend = "Decreasing";
-            drawDiagonalDownArrow(40, 170, 20, colorBasedOnGlucose);
+            drawDiagonalDownArrow(130, 50, 15, colorBasedOnGlucose);
         }
         else
         {
-            // For all other trends, use the character arrows
-            tft.setCursor(40, 170);
             tft.print(DEXCOM_TREND_ARROWS[trendIndex]);
         }
     }
     else
     {
-        // Unknown trend
-        tft.setCursor(40, 170);
         tft.print("?");
     }
 
     // Trend Text
     tft.setTextSize(2);
-    tft.setCursor(100, 180);
+    tft.setCursor(170, 50);
     tft.print(trend);
 
-    // Timestamp
+    // Row 3: Timestamp
     tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(40, 210);
+    tft.setTextSize(1);
+    tft.setCursor(10, 80);
     tft.print("Updated: ");
     tft.print(timestamp);
+
+    // Separator line
+    tft.drawLine(0, 95, 320, 95, ILI9341_DARKGREY);
+
+    // Row 4: Graph title - dynamic based on actual data range
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(10, 100);
+    if (graphCount >= 2)
+    {
+        time_t range = graphTimestamps[graphCount - 1] - graphTimestamps[0];
+        int hours = (range + 1800) / 3600; // Round to nearest hour
+        if (hours < 1)
+            hours = 1;
+        tft.printf("Last %d hours", hours);
+    }
+    else
+    {
+        tft.print("Last -- hours");
+    }
+
+    // Draw the glucose graph
+    drawGraph();
 }
 
 void displayWiFiStatus(bool status)
