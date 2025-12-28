@@ -23,6 +23,9 @@ Previous version
 -   Jumper wires (if the microcontroller and display are separated, recommended to have it as one unit).
 -   Have an account on Dexcom Share
 
+-   ### Optional
+    -    [3d Model I used to house the device](https://makerworld.com/en/models/1012388-housing-display-tft-ili9341-esp32-esp8266#profileId-991967) designed by [@maker.bamboo](https://makerworld.com/en/@maker.bamboo)
+
 ## Configuration
 
 -   Dexcom Share Username and Password
