@@ -2,19 +2,19 @@
 
 This is a simple monitor to display the current glucose level and trend through an ESP32 and a 2.8" TFT LCD display.
 
-## Known issues
-
--   Timestamp will not display correctly on certain timezones
--   Diagonal arrows don't look correct
-
 ## Features
 
+As of December 2025
+![IMG_1012](https://github.com/user-attachments/assets/913a7c67-1cd0-44fd-90eb-141ca4048f58)
+
+Previous version
 ![IMG_8577](https://github.com/user-attachments/assets/b6ac8dad-ef86-4e08-9859-ca909362449d)
 
 -   Display the current glucose level in mg/dL and mmol/L
 -   Display the change from the previous reading
 -   Display the trend (up, down, flat)
 -   Display the time and date
+-   Display a graph with the last 6h of readings
 
 ## Requirements
 
@@ -56,6 +56,12 @@ This is a simple monitor to display the current glucose level and trend through 
 -   If you experience any issues or have suggestions, please open an issue or submit a pull request or contact me at jmedinamulet@gmail.com
 
 ## Changelog
+
+-   December 27, 2025
+
+    -   Implemented dynamic polling of Dexcom Readings
+    -   Fix Diagonal arrows
+    -   Added graph with 6 hours of recording
 
 -   August 16, 2025
 
