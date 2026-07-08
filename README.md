@@ -4,11 +4,13 @@ This is a simple monitor to display the current glucose level and trend through 
 
 ## Features
 
-As of December 2025
+As of July 2026
 ![IMG_1012](https://github.com/user-attachments/assets/913a7c67-1cd0-44fd-90eb-141ca4048f58)
 
-Previous version
-![IMG_8577](https://github.com/user-attachments/assets/b6ac8dad-ef86-4e08-9859-ca909362449d)
+Wifi and Credentials Dashboard
+
+<img width="603" height="1311" alt="IMG_1650" src="https://github.com/user-attachments/assets/d573e00b-3c7c-4a90-b5b2-9a8df34fd102" />
+
 
 - Display the current glucose level in mg/dL and mmol/L
 - Display the change from the previous reading
