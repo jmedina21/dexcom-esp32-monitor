@@ -24,19 +24,19 @@ Previous version
 -   Have an account on Dexcom Share
 
 ### Arduino Libraries Required
-Install the following libraries via Arduino IDE Library Manager:
 
-- Adafruit GFX Library
-- Adafruit ILI9341
-- ArduinoJson
+Install the following libraries via Arduino IDE Library Manager:
+-   **WiFiManager** by tzapu (https://github.com/tzapu/WiFiManager)
+-   Adafruit GFX Library
+-   Adafruit ILI9341
+-   ArduinoJson
 
 -   ### Optional
     -    [3d Model I used to house the device](https://makerworld.com/en/models/1012388-housing-display-tft-ili9341-esp32-esp8266#profileId-991967) designed by [@maker.bamboo](https://makerworld.com/en/@maker.bamboo)
 
 ## Configuration
 
--   Dexcom Share Username and Password
--   WiFi SSID and Password
+No need to modify the code! WiFi and Dexcom credentials are configured via a web portal.
 
 -   Cable Connection (if the units are separated)
 
@@ -55,9 +55,19 @@ Install the following libraries via Arduino IDE Library Manager:
 
 1. Connect the ESP32 to the TFT LCD display
 2. Connect the ESP32 to your computer via USB
-3. Replace the `xxxx` in the code with your Dexcom Share Username and Password and WiFi SSID and Password
+3. Install the required Arduino libraries (see Requirements above)
 4. Upload the code to the ESP32
-5. Open the Serial Monitor at 115200 baud to see the output
+5. On first boot, the device will create a WiFi network called **"DexcomMonitor-Setup"**
+6. Connect to this network with your phone or computer
+7. A configuration page will open automatically (or navigate to http://192.168.4.1)
+8. Enter your WiFi credentials and Dexcom Share username/password
+9. Click Save - the device will restart and connect to your WiFi
+
+### Resetting Configuration
+
+To reset the WiFi and Dexcom credentials:
+- Hold the **BOOT button** (GPIO 0) while the device is starting up
+- The device will clear saved credentials and re-enter setup mode
 
 ## Notes
 
@@ -66,6 +76,13 @@ Install the following libraries via Arduino IDE Library Manager:
 -   If you experience any issues or have suggestions, please open an issue or submit a pull request or contact me at jmedinamulet@gmail.com
 
 ## Changelog
+
+-   December 28, 2025
+
+    -   Added WiFiManager for easy WiFi and Dexcom credential configuration
+    -   No longer need to modify code to set credentials
+    -   Credentials stored securely in ESP32 flash memory
+    -   Hold BOOT button during startup to reset configuration
 
 -   December 27, 2025
 

@@ -5,9 +5,18 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <time.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
 
-const char *ssid = "xxxx";     // Replace with your Wi-Fi SSID
-const char *password = "xxxx"; // Replace with your Wi-Fi password
+// Preferences for storing credentials
+Preferences preferences;
+
+// Credential storage (loaded from Preferences)
+String storedDexcomUsername = "";
+String storedDexcomPassword = "";
+
+// Reset button pin (hold during boot to reset config)
+#define RESET_CONFIG_PIN 0  // GPIO0 - BOOT button on most ESP32 boards
 
 // Define ESP32 Pins for ILI9341
 #define TFT_CS 5  // Chip Select
@@ -27,8 +36,7 @@ const char *dexcomDataURL = "https://share2.dexcom.com/ShareWebServices/Services
 //  const char *dexcomLoginURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
 //  const char *dexcomDataURL = "https://shareous1.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
 
-const char *dexcomUsername = "xxxx";
-const char *dexcomPassword = "xxxx";
+// Dexcom credentials are now stored in Preferences and loaded at runtime
 
 const char *applicationId = "d8665ade-9673-4e27-9ff6-92db4ce13d13"; // This is a constant for the Dexcom API
 
@@ -93,19 +101,253 @@ const char *DEXCOM_TREND_ARROWS[] = {
     "-"         // 9 - RateOutOfRange
 };
 
+// Load saved credentials from Preferences
+void loadCredentials()
+{
+    preferences.begin("dexcom", true); // Read-only mode
+    storedDexcomUsername = preferences.getString("username", "");
+    storedDexcomPassword = preferences.getString("password", "");
+    preferences.end();
+
+    Serial.println("Loaded credentials from storage");
+    Serial.printf("Username: %s\n", storedDexcomUsername.length() > 0 ? "(set)" : "(empty)");
+}
+
+// Save credentials to Preferences
+void saveCredentials(const char *username, const char *password)
+{
+    preferences.begin("dexcom", false); // Read-write mode
+    preferences.putString("username", username);
+    preferences.putString("password", password);
+    preferences.end();
+
+    storedDexcomUsername = String(username);
+    storedDexcomPassword = String(password);
+
+    Serial.println("Credentials saved to storage");
+}
+
+// Clear all saved credentials and WiFi config
+void clearCredentials()
+{
+    preferences.begin("dexcom", false);
+    preferences.clear();
+    preferences.end();
+
+    storedDexcomUsername = "";
+    storedDexcomPassword = "";
+
+    Serial.println("Credentials cleared from storage");
+}
+
+// Display configuration portal status on TFT
+void displayConfigPortalStatus(const char *ssid)
+{
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setTextColor(ILI9341_YELLOW);
+    tft.setTextSize(2);
+    tft.setCursor(20, 20);
+    tft.print("WiFi Setup Mode");
+
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(20, 60);
+    tft.print("Connect to WiFi network:");
+
+    tft.setTextColor(ILI9341_CYAN);
+    tft.setTextSize(2);
+    tft.setCursor(20, 80);
+    tft.print(ssid);
+
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(20, 120);
+    tft.print("Then open browser to:");
+    tft.setTextColor(ILI9341_CYAN);
+    tft.setCursor(20, 135);
+    tft.print("http://192.168.4.1");
+
+    tft.setTextColor(ILI9341_DARKGREY);
+    tft.setCursor(20, 170);
+    tft.print("Enter WiFi and Dexcom credentials");
+    tft.setCursor(20, 185);
+    tft.print("to configure the monitor.");
+
+    tft.setTextColor(ILI9341_RED);
+    tft.setCursor(20, 210);
+    tft.print("Hold BOOT button at startup to reset");
+}
+
 void setup()
 {
     Serial.begin(115200);
 
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED)
+    // Initialize reset button pin
+    pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
+
+    // Initialize Display first so we can show status
+    SPI.begin(23, 19, 18, 5);
+    tft.begin();
+    tft.setRotation(3);
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(30, 30);
+    tft.print("Glucose Monitor!");
+
+    // Check if reset button is held during boot
+    bool resetConfig = (digitalRead(RESET_CONFIG_PIN) == LOW);
+    if (resetConfig)
     {
+        Serial.println("Reset button held - clearing credentials");
+        tft.setCursor(30, 60);
+        tft.setTextColor(ILI9341_RED);
+        tft.print("Resetting config...");
+        clearCredentials();
         delay(1000);
-        Serial.println("Connecting to WiFi...");
     }
+
+    // Load saved Dexcom credentials
+    loadCredentials();
+
+    // Create WiFiManager instance
+    WiFiManager wm;
+
+    // Set connection timeout (seconds) - don't wait forever
+    wm.setConnectTimeout(30);
+
+    // Custom parameters for Dexcom credentials
+    WiFiManagerParameter dexcom_user("dexcom_user", "Dexcom Username", storedDexcomUsername.c_str(), 64);
+    WiFiManagerParameter dexcom_pass("dexcom_pass", "Dexcom Password", storedDexcomPassword.c_str(), 64);
+
+    wm.addParameter(&dexcom_user);
+    wm.addParameter(&dexcom_pass);
+
+    // Set callback for when config is saved
+    wm.setSaveParamsCallback([&dexcom_user, &dexcom_pass]()
+                             { saveCredentials(dexcom_user.getValue(), dexcom_pass.getValue()); });
+
+    // Set custom AP name
+    const char *apName = "DexcomMonitor-Setup";
+
+    // Set timeout for config portal (2 minutes)
+    wm.setConfigPortalTimeout(120);
+
+    // Display portal info on TFT when portal starts
+    wm.setAPCallback([](WiFiManager *wm)
+                     {
+                         // Re-init display in case of SPI issues
+                         tft.begin();
+                         tft.setRotation(3);
+                         displayConfigPortalStatus(wm->getConfigPortalSSID().c_str());
+                     });
+
+    bool connected;
+    if (resetConfig || storedDexcomUsername.length() == 0)
+    {
+        // Show setup instructions on welcome screen
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(2);
+        tft.setCursor(35, 5);
+        tft.print("Welcome to");
+        tft.setCursor(15, 28);
+        tft.print("Glucose Monitor!");
+
+        tft.setTextSize(2);
+        tft.setCursor(10, 65);
+        tft.print("Connect to WiFi:");
+
+        tft.setTextColor(ILI9341_YELLOW);
+        tft.setTextSize(2);
+        tft.setCursor(10, 90);
+        tft.print(apName);
+
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(2);
+        tft.setCursor(10, 125);
+        tft.print("Open browser to:");
+
+        tft.setTextColor(ILI9341_GREEN);
+        tft.setTextSize(3);
+        tft.setCursor(10, 150);
+        tft.print("192.168.4.1");
+
+        tft.setTextColor(ILI9341_LIGHTGREY);
+        tft.setTextSize(1);
+        tft.setCursor(10, 195);
+        tft.print("Enter WiFi and Dexcom credentials");
+        tft.setCursor(10, 210);
+        tft.print("to get started.");
+
+        // Force config portal if reset or no credentials
+        connected = wm.startConfigPortal(apName);
+    }
+    else
+    {
+        tft.setCursor(30, 60);
+        tft.print("Connecting to WiFi...");
+
+        // Try auto-connect, fall back to config portal if it fails
+        connected = wm.autoConnect(apName);
+    }
+
+    // Re-initialize display immediately after WiFiManager (can cause SPI issues)
+    tft.begin();
+    tft.setRotation(3);
+
+    if (!connected)
+    {
+        Serial.println("WiFi connection failed - reopening config portal");
+
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setTextColor(ILI9341_RED);
+        tft.setTextSize(2);
+        tft.setCursor(20, 20);
+        tft.print("WiFi Failed!");
+
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(2);
+        tft.setCursor(20, 55);
+        tft.print("Check WiFi password");
+
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(1);
+        tft.setCursor(20, 100);
+        tft.print("Restarting setup in 5 seconds...");
+        tft.setCursor(20, 120);
+        tft.print("Connect to:");
+        tft.setTextColor(ILI9341_YELLOW);
+        tft.setTextSize(2);
+        tft.setCursor(20, 135);
+        tft.print(apName);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(1);
+        tft.setCursor(20, 165);
+        tft.print("Then go to:");
+        tft.setTextColor(ILI9341_GREEN);
+        tft.setTextSize(2);
+        tft.setCursor(20, 180);
+        tft.print("192.168.4.1");
+
+        delay(5000);
+        clearCredentials();
+        ESP.restart();
+    }
+
     Serial.println("Connected to WiFi");
 
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setTextColor(ILI9341_GREEN);
+    tft.setTextSize(2);
+    tft.setCursor(30, 30);
+    tft.print("WiFi Connected!");
+
     // Sync time with NTP server
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(30, 60);
+    tft.print("Syncing time...");
+
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     Serial.print("Syncing NTP time");
     time_t now = 0;
@@ -129,20 +371,10 @@ void setup()
         Serial.println(" failed! Using fallback polling.");
     }
 
-    // Initialize Display
-    SPI.begin(23, 19, 18, 5);
-    tft.begin();
-    tft.setRotation(3);
-    tft.fillScreen(ILI9341_BLACK);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(30, 30);
-    tft.print("Glucose Monitor!");
-
-    tft.setCursor(30, 120);
+    tft.setCursor(30, 90);
     tft.print("Loading Glucose Data...");
 
-    delay(2000);
+    delay(1000);
 
     if (authenticateToDexcom() && loginToDexcom())
     {
@@ -150,7 +382,40 @@ void setup()
     }
     else
     {
-        Serial.println("Initial Dexcom login failed");
+        Serial.println("Dexcom login failed - reopening config portal");
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setTextColor(ILI9341_RED);
+        tft.setTextSize(2);
+        tft.setCursor(20, 20);
+        tft.print("Dexcom Failed!");
+
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(2);
+        tft.setCursor(20, 55);
+        tft.print("Check Dexcom credentials");
+
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(1);
+        tft.setCursor(20, 100);
+        tft.print("Restarting setup in 5 seconds...");
+        tft.setCursor(20, 120);
+        tft.print("Connect to:");
+        tft.setTextColor(ILI9341_YELLOW);
+        tft.setTextSize(2);
+        tft.setCursor(20, 135);
+        tft.print("DexcomMonitor-Setup");
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(1);
+        tft.setCursor(20, 165);
+        tft.print("Then go to:");
+        tft.setTextColor(ILI9341_GREEN);
+        tft.setTextSize(2);
+        tft.setCursor(20, 180);
+        tft.print("192.168.4.1");
+
+        delay(5000);
+        clearCredentials();
+        ESP.restart();
     }
 }
 
@@ -215,11 +480,16 @@ bool authenticateToDexcom()
 {
     if (WiFi.status() != WL_CONNECTED)
         return false;
+    if (storedDexcomUsername.length() == 0 || storedDexcomPassword.length() == 0)
+    {
+        Serial.println("Dexcom credentials not configured");
+        return false;
+    }
     HTTPClient http;
     http.setTimeout(8000);
     http.begin(dexcomAuthenticateURL);
     http.addHeader("Content-Type", "application/json");
-    String payload = "{\"accountName\":\"" + String(dexcomUsername) + "\",\"password\":\"" + String(dexcomPassword) + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
+    String payload = "{\"accountName\":\"" + storedDexcomUsername + "\",\"password\":\"" + storedDexcomPassword + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
     int code = http.POST(payload);
     if (code == HTTP_CODE_OK)
     {
@@ -240,7 +510,7 @@ bool loginToDexcom()
     http.setTimeout(8000);
     http.begin(dexcomLoginURL);
     http.addHeader("Content-Type", "application/json");
-    String payload = "{\"accountId\":\"" + accountId + "\",\"password\":\"" + String(dexcomPassword) + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
+    String payload = "{\"accountId\":\"" + accountId + "\",\"password\":\"" + storedDexcomPassword + "\",\"applicationId\":\"" + String(applicationId) + "\"}";
     int code = http.POST(payload);
     if (code == HTTP_CODE_OK)
     {
