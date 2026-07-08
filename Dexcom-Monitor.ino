@@ -26,15 +26,30 @@ String storedDexcomPassword = "";
 // Initialize Display
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
-// North America
-const char *dexcomAuthenticateURL = "https://share2.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
-const char *dexcomLoginURL = "https://share2.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
-const char *dexcomDataURL = "https://share2.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
+// Dexcom region (loaded from Preferences): "us", "ous" (worldwide outside US), or "jp" (Japan)
+String storedDexcomRegion = "us";
 
-// Other Regions
-//  const char *dexcomAuthenticateURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/AuthenticatePublisherAccount";
-//  const char *dexcomLoginURL = "https://shareous1.dexcom.com/ShareWebServices/Services/General/LoginPublisherAccountById";
-//  const char *dexcomDataURL = "https://shareous1.dexcom.com/ShareWebServices/Services/Publisher/ReadPublisherLatestGlucoseValues";
+// Dexcom Share API endpoints - derived at runtime from the selected region
+String dexcomAuthenticateURL;
+String dexcomLoginURL;
+String dexcomDataURL;
+
+// Build the API URLs for the currently selected region
+void updateDexcomURLs()
+{
+    String host;
+    if (storedDexcomRegion == "ous")
+        host = "shareous1.dexcom.com"; // Outside US (worldwide)
+    else if (storedDexcomRegion == "jp")
+        host = "share.dexcom.jp"; // Japan
+    else
+        host = "share2.dexcom.com"; // United States (default)
+
+    String base = "https://" + host + "/ShareWebServices/Services/";
+    dexcomAuthenticateURL = base + "General/AuthenticatePublisherAccount";
+    dexcomLoginURL = base + "General/LoginPublisherAccountById";
+    dexcomDataURL = base + "Publisher/ReadPublisherLatestGlucoseValues";
+}
 
 // Dexcom credentials are now stored in Preferences and loaded at runtime
 
@@ -107,24 +122,38 @@ void loadCredentials()
     preferences.begin("dexcom", true); // Read-only mode
     storedDexcomUsername = preferences.getString("username", "");
     storedDexcomPassword = preferences.getString("password", "");
+    storedDexcomRegion = preferences.getString("region", "us");
     preferences.end();
+
+    updateDexcomURLs();
 
     Serial.println("Loaded credentials from storage");
     Serial.printf("Username: %s\n", storedDexcomUsername.length() > 0 ? "(set)" : "(empty)");
+    Serial.printf("Region: %s\n", storedDexcomRegion.c_str());
 }
 
 // Save credentials to Preferences
-void saveCredentials(const char *username, const char *password)
+void saveCredentials(const char *username, const char *password, const char *region)
 {
+    // Default to US if the region is missing or unrecognized
+    String regionStr = String(region);
+    if (regionStr != "ous" && regionStr != "jp")
+        regionStr = "us";
+
     preferences.begin("dexcom", false); // Read-write mode
     preferences.putString("username", username);
     preferences.putString("password", password);
+    preferences.putString("region", regionStr);
     preferences.end();
 
     storedDexcomUsername = String(username);
     storedDexcomPassword = String(password);
+    storedDexcomRegion = regionStr;
+
+    updateDexcomURLs();
 
     Serial.println("Credentials saved to storage");
+    Serial.printf("Region: %s\n", storedDexcomRegion.c_str());
 }
 
 // Clear all saved credentials and WiFi config
@@ -136,6 +165,9 @@ void clearCredentials()
 
     storedDexcomUsername = "";
     storedDexcomPassword = "";
+    storedDexcomRegion = "us";
+
+    updateDexcomURLs();
 
     Serial.println("Credentials cleared from storage");
 }
@@ -220,12 +252,31 @@ void setup()
     WiFiManagerParameter dexcom_user("dexcom_user", "Dexcom Username", storedDexcomUsername.c_str(), 64);
     WiFiManagerParameter dexcom_pass("dexcom_pass", "Dexcom Password", storedDexcomPassword.c_str(), 64);
 
+    // Region selector: a dropdown (UI only) that writes into a hidden field which
+    // WiFiManager actually captures via getValue(). Pre-selects the saved region on load.
+    static const char REGION_SELECT_HTML[] =
+        "<br/><label for='region_ui'>Dexcom Region</label><br/>"
+        "<select id='region_ui' onchange=\"document.getElementById('dexcom_region').value=this.value;\">"
+        "<option value='us'>United States</option>"
+        "<option value='ous'>Outside US / Worldwide</option>"
+        "<option value='jp'>Japan</option>"
+        "</select>"
+        "<script>window.addEventListener('load',function(){"
+        "var h=document.getElementById('dexcom_region');var s=document.getElementById('region_ui');"
+        "if(h&&s){s.value=(h.value||'us');}});</script>";
+
+    // Hidden field holds the actual value WiFiManager submits and captures
+    WiFiManagerParameter dexcom_region("dexcom_region", "", storedDexcomRegion.c_str(), 5, " type='hidden'");
+    WiFiManagerParameter region_select(REGION_SELECT_HTML);
+
     wm.addParameter(&dexcom_user);
     wm.addParameter(&dexcom_pass);
+    wm.addParameter(&dexcom_region);
+    wm.addParameter(&region_select);
 
     // Set callback for when config is saved
-    wm.setSaveParamsCallback([&dexcom_user, &dexcom_pass]()
-                             { saveCredentials(dexcom_user.getValue(), dexcom_pass.getValue()); });
+    wm.setSaveParamsCallback([&dexcom_user, &dexcom_pass, &dexcom_region]()
+                             { saveCredentials(dexcom_user.getValue(), dexcom_pass.getValue(), dexcom_region.getValue()); });
 
     // Set custom AP name
     const char *apName = "DexcomMonitor-Setup";
